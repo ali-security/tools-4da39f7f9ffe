@@ -44,12 +44,6 @@ func RunServer(ctx context.Context, stream jsonrpc2.Stream, opts ...interface{})
 
 // RunServerOnPort starts an LSP server on the given port and does not exit.
 // This function exists for debugging purposes.
-func RunServerOnPort(ctx context.Context, port int, opts ...interface{}) error {
-	return RunServerOnAddress(ctx, fmt.Sprintf(":%v", port))
-}
-
-// RunServerOnPort starts an LSP server on the given port and does not exit.
-// This function exists for debugging purposes.
 func RunServerOnAddress(ctx context.Context, addr string, opts ...interface{}) error {
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
