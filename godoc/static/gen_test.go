@@ -9,6 +9,7 @@ import (
 	"io/ioutil"
 	"runtime"
 	"strconv"
+	"strings"
 	"testing"
 	"unicode"
 )
@@ -36,6 +37,26 @@ func TestStaticIsUpToDate(t *testing.T) {
   $ git diff
 to see the differences.`)
 
+	}
+}
+
+// TestJQueryHTMLManipulation checks that the jquery.js served by godoc does
+// not mutate untrusted HTML passed to .html()/.append() and friends:
+// <option> markup is wrapped in <select multiple> only where the browser
+// cannot parse it bare (CVE-2020-11023), and self-closing tags are no longer
+// expanded with "<$1></$2>" (CVE-2020-11022).
+func TestJQueryHTMLManipulation(t *testing.T) {
+	js := Files["jquery.js"]
+	for _, bad := range []string{
+		`option:[1,"<select multiple='multiple'>","</select>"]`,
+		`"<$1></$2>"`,
+	} {
+		if strings.Contains(js, bad) {
+			t.Errorf("jquery.js contains vulnerable code %q", bad)
+		}
+	}
+	if !strings.Contains(js, `.support.option||(`) {
+		t.Error("jquery.js does not gate the <option> wrapper on support.option")
 	}
 }
 
