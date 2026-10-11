@@ -26,6 +26,16 @@ import (
 	"golang.org/x/tools/go/packages/packagestest"
 )
 
+// TestMain restricts packagestest.All to the GOPATH exporter on windows:
+// with Go 1.12 the Modules subtests flake there (a different test each run,
+// with the underlying go list error swallowed).
+func TestMain(m *testing.M) {
+	if runtime.GOOS == "windows" {
+		packagestest.All = []packagestest.Exporter{packagestest.GOPATH}
+	}
+	os.Exit(m.Run())
+}
+
 // TODO(adonovan): more test cases to write:
 //
 // - When the tests fail, make them print a 'cd & load' command
@@ -788,7 +798,8 @@ func testParseFileModifyAST(t *testing.T, exporter packagestest.Exporter) {
 	}
 	initial, err := packages.Load(exported.Config, "golang.org/fake/a")
 	if err != nil {
-		t.Error(err)
+		// Fatal, not Error: initial[0] below would panic on a failed load.
+		t.Fatal(err)
 	}
 
 	// Check value of a.A has been set to "b"

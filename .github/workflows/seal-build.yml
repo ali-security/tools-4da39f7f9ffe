@@ -1,0 +1,174 @@
+name: seal-build
+
+# Authored for the sealed build: golang.org/x/tools has no GitHub Actions CI
+# upstream (Gerrit + the Go build dashboard), so this workflow produces the
+# module zip and runs the module's own test suite with a contemporary Go.
+
+on:
+  workflow_dispatch:
+    inputs:
+      test-filter:
+        description: "Optional go test -run selector; empty runs the full suite"
+        type: string
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  zip:
+    name: module zip
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      MODULE_PATH: golang.org/x/tools
+      MODULE_VERSION: v0.0.0-20190328211700-ab21143f2384
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+          cache: false
+
+      - name: Build x/mod zip helper
+        run: |
+          set -eux
+          # Built outside the checkout so golang.org/x/mod never touches the
+          # library's go.mod/go.sum. Module+version pin only, no go mod tidy.
+          HELPER="$(mktemp -d)"
+          cp "$GITHUB_WORKSPACE/.github/create_mod.go" "$HELPER/"
+          cd "$HELPER"
+          go mod init example.com/createmod
+          go get golang.org/x/mod@v0.24.0
+          go build -o "$RUNNER_TEMP/create_mod" create_mod.go
+
+      - name: Stage module tree
+        run: |
+          set -eux
+          # Upstream ships no .github; our authored files must not enter the zip.
+          # GNU tar's --exclude=.git matches only the .git component, so
+          # .gitignore and .gitattributes (present in the proxy zip) are kept.
+          STAGE="$RUNNER_TEMP/zipsrc"
+          mkdir -p "$STAGE"
+          tar -c --exclude=.git --exclude=.github -C "$GITHUB_WORKSPACE" . | tar -x -C "$STAGE"
+          test ! -e "$STAGE/.github"
+          test ! -e "$STAGE/.git"
+          test -f "$STAGE/go.mod"
+          test -f "$STAGE/.gitignore"
+          test -f "$STAGE/.gitattributes"
+
+      - name: Create module zip
+        run: |
+          set -eux
+          OUT="$RUNNER_TEMP/out"
+          mkdir -p "$OUT"
+          ZIP="$OUT/$MODULE_VERSION.zip"
+          "$RUNNER_TEMP/create_mod" "$MODULE_PATH" "$MODULE_VERSION" "$RUNNER_TEMP/zipsrc" "$ZIP"
+          ENTRIES="$(unzip -Z1 "$ZIP" | wc -l)"
+          echo "module zip entries: $ENTRIES"
+          test "$ENTRIES" -gt 0
+          # Every entry must sit under <module>@<version>/ and none may be ours.
+          PREFIX="$MODULE_PATH@$MODULE_VERSION/"
+          BAD="$(unzip -Z1 "$ZIP" | awk -v p="$PREFIX" 'index($0, p) != 1 || index($0, p ".github/") == 1' | wc -l)"
+          test "$BAD" -eq 0
+          ls -l "$ZIP"
+          sha256sum "$ZIP"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: module-zip
+          path: ${{ runner.temp }}/out/v0.0.0-20190328211700-ab21143f2384.zip
+          if-no-files-found: error
+
+  test:
+    name: test (${{ matrix.os }}, go ${{ matrix.go }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        # go.mod declares go 1.11; Go 1.12 is contemporary with this 2019 snapshot.
+        go: ["1.12.17"]
+    defaults:
+      run:
+        shell: bash
+    env:
+      GO111MODULE: "on"
+      # Go 1.12 has an empty default GOPROXY.
+      GOPROXY: https://proxy.golang.org
+      GOFLAGS: ""
+    steps:
+      - name: Disable CRLF conversion
+        run: git config --global core.autocrlf false
+
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ matrix.go }}
+          cache: false
+
+      - name: Install mingw 8.1.0 (Windows cgo for Go 1.12)
+        if: runner.os == 'Windows'
+        run: |
+          set -eux
+          # The runner's default gcc (UCRT) lacks __imp___iob_func, which Go 1.12
+          # runtime/cgo needs.
+          choco install mingw --version 8.1.0 --allow-downgrade -y --no-progress
+          echo 'C:\ProgramData\chocolatey\lib\mingw\tools\install\mingw64\bin' >> "$GITHUB_PATH"
+          echo "TEMP=$RUNNER_TEMP" >> "$GITHUB_ENV"
+          echo "TMP=$RUNNER_TEMP" >> "$GITHUB_ENV"
+
+      - name: Verify toolchain
+        run: |
+          set -eux
+          go version
+          go env
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            command -v gcc
+            gcc --version | grep -F 8.1.0
+          fi
+
+      - name: Build
+        run: |
+          set -eux
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            # cmd/splitdwarf is !windows apart from doc.go: no main, link fails.
+            go build $(go list ./... | grep -v '/cmd/splitdwarf$')
+          else
+            go build ./...
+          fi
+
+      - name: Test
+        run: |
+          set -eux
+          set -o pipefail
+          go test -p 1 -v ${{ inputs.test-filter && format('-run {0}', inputs.test-filter) || '' }} ./... 2>&1 | tee "$RUNNER_TEMP/go-test.log"
+
+      - name: TEST SUMMARY
+        if: always()
+        run: |
+          set -eu
+          LOG="$RUNNER_TEMP/go-test.log"
+          if [ ! -f "$LOG" ]; then
+            echo "no test log: the test step did not run"
+            exit 1
+          fi
+          echo "--- failing tests/packages (if any) ---"
+          grep -E '^[[:space:]]*--- FAIL|^FAIL[[:space:]]' "$LOG" || echo "none"
+          awk '
+            /^[ \t]*--- PASS/ { pass++ }
+            /^[ \t]*--- FAIL/ { fail++ }
+            /^[ \t]*--- SKIP/ { skip++ }
+            /^ok[ \t]/        { okp++ }
+            /^FAIL[ \t]/      { failp++ }
+            /^panic: /        { panics++ }
+            END {
+              printf "TEST SUMMARY: %d passed, %d failed, %d skipped\n", pass, fail, skip
+              printf "PACKAGES: %d ok, %d FAIL, %d panic\n", okp, failp, panics
+              if (fail + failp + panics > 0) exit 1
+            }
+          ' "$LOG"

@@ -6,6 +6,7 @@ package packages_test
 
 import (
 	"bytes"
+	"go/build"
 	"io/ioutil"
 	"path/filepath"
 	"runtime"
@@ -77,6 +78,15 @@ func TestCgoOption(t *testing.T) {
 	// if !build.Default.CgoEnabled {
 	// 	return
 	// }
+	//
+	// Re-enabled for windows (net.cgoLookupHost does not exist there; go/loader's
+	// twin test skips windows too) and for nocgo builds (no runtime/cgo).
+	if runtime.GOOS == "windows" {
+		t.Skipf("no cgo-specific net implementation on %s", runtime.GOOS)
+	}
+	if !build.Default.CgoEnabled {
+		t.Skip("cgo is disabled")
+	}
 
 	// Test that we can load cgo-using packages with
 	// DisableCgo=true/false, which, among other things, causes go
